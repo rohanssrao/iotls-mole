@@ -1,0 +1,24 @@
+[project]
+name = "iotls-mole"
+version = "0.1.0"
+description = "Transparent IoT TLS certificate validation test harness"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=42",
+  "scapy>=2.5",
+]
+
+[project.scripts]
+iotls-mole = "iotls_mole.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
