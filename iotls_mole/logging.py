@@ -54,7 +54,7 @@ class EventLogger:
         if self.verbose:
             return True
         if self.quiet:
-            return kind in {"INFO", "WARN", "ERROR", "TLS", "UPSTREAM_CERT", "SECRET", "PLAINTEXT", "SUMMARY", "SUMMARY_TLS"} and (
+            return kind in {"INFO", "WARN", "ERROR", "TLS", "UPSTREAM_CERT", "SECRET", "FAIL_OPEN", "STARTTLS_STRIP", "PLAINTEXT", "SUMMARY", "SUMMARY_TLS"} and (
                 kind not in {"INFO"} or f.get("msg") in {"stopping", "cleanup_only_done"}
             )
         if kind in self.QUIET_KINDS:
@@ -65,6 +65,22 @@ class EventLogger:
             self.seen.add(key); return True
         if kind == "MDNS":
             key = (kind, f.get("services"))
+            if key in self.seen: return False
+            self.seen.add(key); return True
+        if kind == "DNS_SPOOF":
+            key = (kind, f.get("query"), f.get("action"))
+            if key in self.seen: return False
+            self.seen.add(key); return True
+        if kind == "COAP":
+            key = (kind, f.get("method") or f.get("code"), f.get("uri"))
+            if key in self.seen: return False
+            self.seen.add(key); return True
+        if kind == "DTLS_CLIENTHELLO":
+            key = (kind, f.get("dest"), f.get("version"))
+            if key in self.seen: return False
+            self.seen.add(key); return True
+        if kind == "IPV6_ESCAPE":
+            key = (kind, f.get("src"))
             if key in self.seen: return False
             self.seen.add(key); return True
         if kind == "PAYLOAD":
@@ -93,10 +109,24 @@ class EventLogger:
             return base
         if kind == "SECRET":
             return f"[{ts}] \U0001f511 SECRET {record.get('secret')} ({record.get('direction')}) dest={record.get('dest')} value={record.get('value')}"
+        if kind == "FAIL_OPEN":
+            return f"[{ts}] \u26a0\ufe0f  FAIL_OPEN {record.get('dest')} (refused TLS on :{record.get('tls_port')}, retried cleartext) sni={record.get('sni')}"
+        if kind == "STARTTLS_STRIP":
+            return f"[{ts}] \u26a0\ufe0f  STARTTLS_STRIP {record.get('dest','')} {record.get('msg','')}".rstrip()
         if kind == "DNS":
             return f"[{ts}] DNS {record.get('query')} via {record.get('dest')}"
         if kind == "MDNS":
             return f"[{ts}] MDNS {record.get('services')}"
+        if kind == "DNS_SPOOF":
+            ans = f" -> {record.get('answer')}" if record.get("answer") else ""
+            return f"[{ts}] DNS_SPOOF {record.get('query')} {record.get('action')}{ans}"
+        if kind == "COAP":
+            p = f" payload={record.get('payload')}" if record.get("payload") else ""
+            return f"[{ts}] CoAP {record.get('dest')} {record.get('summary')}{p}"
+        if kind == "DTLS_CLIENTHELLO":
+            return f"[{ts}] DTLS_CLIENTHELLO {record.get('dest')} {record.get('version')} (encrypted CoAP; not decrypted)"
+        if kind == "IPV6_ESCAPE":
+            return f"[{ts}] \u26a0\ufe0f  IPV6_ESCAPE src={record.get('src')} dst={record.get('dst')} (outside IPv4 ARP scope)"
         if kind == "UPSTREAM_CERT":
             flags = ",".join(f for f, on in (("self-signed", record.get("self_signed")), ("expired", record.get("expired"))) if on) or "valid-ish"
             return f"[{ts}] UPSTREAM_CERT dest={record.get('dest')} subject={record.get('subject')} issuer={record.get('issuer')} [{flags}]"

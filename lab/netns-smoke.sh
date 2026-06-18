@@ -29,11 +29,13 @@ cleanup() {
 trap cleanup EXIT
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
-[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run as root (use: sudo -E bash lab/netns-smoke.sh)" >&2; exit 1; }
 need ip; need iptables; need python3; need openssl
-python3 - <<'PY' >/dev/null
-import cryptography, scapy
-PY
+UV="$(command -v uv || true)"
+[ -n "$UV" ] || { echo "uv not found in PATH; run via: sudo -E env PATH=\"\$PATH\" bash lab/netns-smoke.sh" >&2; exit 1; }
+# Prepare the project venv once (needs network) so the in-namespace `uv run
+# --no-sync` below works offline.
+(cd "$ROOT" && "$UV" sync --quiet) || { echo "uv sync failed" >&2; exit 1; }
 
 cleanup
 mkdir -p "$SESSION"
@@ -60,7 +62,22 @@ mkport "$GW_NS" vgw0 vgw1 "$NET.1"
 mkport "$TARGET_NS" vtgt0 vtgt1 "$NET.10"
 mkport "$MOLE_NS" vmole0 vmole1 "$NET.66"
 
-ip -n "$TARGET_NS" route add default via "$NET.1" dev eth0
+# Default to a DETERMINISTIC path: route the target through the mole (the real
+# effect of a successful ARP spoof) so the CI smoke reliably exercises the
+# redirect -> proxy -> TLS -> funnel -> capture pipeline without the inherent
+# race of ARP poisoning a kernel that answers who-has instantly. Set
+# MOLE_LAB_ARP=1 to instead test live ARP spoofing (flaky by nature in a bridge).
+if [ "${MOLE_LAB_ARP:-0}" = "1" ]; then
+  ip -n "$TARGET_NS" route add default via "$NET.1" dev eth0
+  MOLE_ARP_FLAG=""
+else
+  ip -n "$TARGET_NS" route add default via "$NET.66" dev eth0   # via mole
+  # The lab "upstream" ($NET.1) is on-subnet, so a default route alone won't pull
+  # its traffic through the mole; a /32 forces it (mirrors a real off-subnet dest
+  # reached via the spoofed gateway).
+  ip -n "$TARGET_NS" route add "$NET.1/32" via "$NET.66" dev eth0
+  MOLE_ARP_FLAG="--no-arp"
+fi
 ip -n "$MOLE_NS" route add default via "$NET.1" dev eth0
 
 # A tiny HTTPS server in the gateway namespace. It intentionally uses a self-signed
@@ -87,8 +104,9 @@ sleep 1
 
 # Start IoTLS-Mole in the mole namespace. ARP spoofing and iptables happen only
 # inside the isolated lab namespaces/bridge.
-ip netns exec "$MOLE_NS" env PATH="$PATH" PYTHONPATH="$ROOT" python3 -m iotls_mole.cli "$NET.10" \
-  --out "$SESSION/mole" --include-udp --retest wait --jsonl >"$SESSION/mole.log" 2>"$SESSION/mole.err" & PIDS+=("$!")
+ip netns exec "$MOLE_NS" "$UV" run --no-sync --project "$ROOT" python -m iotls_mole.cli "$NET.10" \
+  --out "$SESSION/mole" --include-udp --retest wait --jsonl $MOLE_ARP_FLAG >"$SESSION/mole.log" 2>"$SESSION/mole.err" & PIDS+=("$!")
+MOLE_PID="$!"
 for i in $(seq 1 20); do
   if grep -q 'arp_spoofing started\|proxy listening' "$SESSION/mole.log" 2>/dev/null; then break; fi
   sleep 1
@@ -98,6 +116,7 @@ if ! grep -q 'proxy listening' "$SESSION/mole.log" 2>/dev/null; then
   cat "$SESSION/mole.err" >&2 || true
   exit 2
 fi
+sleep 1  # let the proxy/netfilter settle before the first client connects
 
 cat > "$SESSION/client.py" <<'PY'
 import socket, ssl, sys
@@ -114,12 +133,11 @@ except Exception as e:
 PY
 
 # First connection should be rejected by a validating client.
-echo "[+] target neighbor table before client attempts:"
-ip -n "$TARGET_NS" neigh show || true
-# Encourage the target namespace to learn the spoofed gateway MAC during the test window.
-ip -n "$TARGET_NS" neigh flush all || true
-sleep 3
-echo "[+] target neighbor table after spoof window:"
+if [ "${MOLE_LAB_ARP:-0}" = "1" ]; then
+  ip -n "$TARGET_NS" neigh flush all || true
+  sleep 3
+fi
+echo "[+] target neighbor table:"
 ip -n "$TARGET_NS" neigh show || true
 
 echo "[+] validating client attempt; expected cert failure"
@@ -129,7 +147,27 @@ sleep 1
 # Second connection accepts any cert, proving the transparent path/proxy works and payload capture occurs.
 echo "[+] insecure client attempt; expected HTTP response through MITM"
 ip netns exec "$TARGET_NS" python3 "$SESSION/client.py" insecure || true
-sleep 2
+sleep 1
+
+# Plaintext CoAP datagram to exercise passive CoAP parsing (new feature).
+echo "[+] coap datagram; expected COAP event"
+ip netns exec "$TARGET_NS" python3 - <<'PY' || true
+import socket
+# CON GET /status (ver=1,type=0,tkl=0 ; code 0.01 ; mid ; Uri-Path option 11 "status")
+pkt = bytes([0x40, 0x01, 0x12, 0x34, (11 << 4) | 6]) + b"status"
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(pkt, ("10.13.37.1", 5683))
+s.close()
+PY
+sleep 1
+
+# Stop the mole gracefully (SIGINT) so it runs cleanup + writes the summary,
+# instead of letting the EXIT trap's `ip netns del` SIGKILL it mid-shutdown.
+kill -INT "$MOLE_PID" 2>/dev/null || true
+for i in $(seq 1 10); do
+  [ -f "$SESSION/mole/summary.txt" ] && break
+  sleep 0.5
+done
 
 echo "[+] Mole log: $SESSION/mole.log"
 tail -n +1 "$SESSION/mole.log" || true
@@ -137,9 +175,9 @@ tail -n +1 "$SESSION/mole.log" || true
 echo "[+] Payload files:"
 find "$SESSION/mole" -type f -maxdepth 4 -print 2>/dev/null || true
 
-if grep -q '"result": "accepted"' "$SESSION/mole.log" && find "$SESSION/mole" -name client.bin -size +0c | grep -q .; then
-  echo "[+] smoke test passed"
+if grep -q '"result": "accepted"' "$SESSION/mole.log" && find "$SESSION/mole" -name client.bin -size +0c | grep -q . && [ -f "$SESSION/mole/summary.txt" ] && grep -q '"kind": "COAP"' "$SESSION/mole.log"; then
+  echo "[+] smoke test passed (intercept + capture + summary + coap)"
 else
-  echo "[-] smoke test did not observe accepted MITM + payload; inspect $SESSION" >&2
+  echo "[-] smoke test did not observe accepted MITM + payload + coap; inspect $SESSION" >&2
   exit 2
 fi

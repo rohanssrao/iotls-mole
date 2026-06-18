@@ -23,6 +23,21 @@ TLS_VERSION_MAP = {
     0x0300: "SSLv3", 0x0301: "TLSv1.0", 0x0302: "TLSv1.1", 0x0303: "TLSv1.2", 0x0304: "TLSv1.3",
 }
 
+# DTLS uses inverted version numbers (1's-complement-ish) and a different record layout.
+DTLS_VERSION_MAP = {0xFEFF: "DTLSv1.0", 0xFEFD: "DTLSv1.2"}
+
+
+def looks_dtls_client_hello(buf: bytes) -> bool:
+    # DTLS record: type 22 (handshake), version 0xFE.., then epoch/seq/length,
+    # then handshake type 1 (ClientHello) at offset 13.
+    return len(buf) >= 14 and buf[0] == 0x16 and buf[1] == 0xFE and buf[13] == 0x01
+
+
+def dtls_version(buf: bytes) -> str | None:
+    if len(buf) < 3:
+        return None
+    return DTLS_VERSION_MAP.get(int.from_bytes(buf[1:3], "big"), hex(int.from_bytes(buf[1:3], "big")))
+
 
 def is_grease(value: int) -> bool:
     # RFC 8701 GREASE values follow the pattern 0x?a?a with matching nibbles.

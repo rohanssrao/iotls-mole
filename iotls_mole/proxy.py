@@ -21,6 +21,52 @@ BUFFER_SIZE = 65536
 IDLE_TIMEOUT = 60
 FIRST_APP_DATA_TIMEOUT = 3
 MAX_SCAN_BYTES = 256 * 1024  # per-direction cap for in-memory secret scanning
+STARTTLS_PORTS = {25, 587, 143, 110, 21, 5222}  # opportunistic-TLS protocols
+
+# Equal-length replacements keep byte offsets/length-prefixes intact so we can
+# strip an opportunistic-TLS capability without corrupting the protocol framing.
+_STARTTLS_TOKENS = [
+    (b"STARTTLS", b"XXXXXXXX"),  # SMTP/IMAP
+    (b"starttls", b"xxxxxxxx"),  # XMPP <starttls/>
+    (b"AUTH TLS", b"XXXXXXXX"),  # FTP
+    (b"AUTH SSL", b"XXXXXXXX"),  # FTP
+    (b"STLS", b"XXXX"),          # POP3
+]
+
+
+def strip_starttls_caps(data: bytes) -> tuple[bytes, bool]:
+    """Blank out STARTTLS capability advertisements so the client stays in cleartext."""
+    changed = False
+    for token, repl in _STARTTLS_TOKENS:
+        if token in data:
+            data = data.replace(token, repl)
+            changed = True
+    return data, changed
+
+
+class FailOpenTracker:
+    """Flags devices that retry in cleartext after their TLS handshake is refused."""
+
+    def __init__(self, window: float = 30.0):
+        self.window = window
+        self._rejects: dict[str, tuple[float, int, str | None]] = {}
+        self._flagged: set[str] = set()
+        self._lock = threading.Lock()
+
+    def record_tls_reject(self, ip: str, port: int, sni: str | None):
+        with self._lock:
+            self._rejects[ip] = (time.time(), port, sni)
+
+    def check_plaintext(self, ip: str, port: int) -> dict | None:
+        with self._lock:
+            rec = self._rejects.get(ip)
+            if not rec or ip in self._flagged:
+                return None
+            ts, tls_port, sni = rec
+            if time.time() - ts > self.window:
+                return None
+            self._flagged.add(ip)
+            return {"tls_port": tls_port, "sni": sni, "cleartext_port": port}
 
 # Maps the TLS alert a client sends when rejecting our forged cert to what that
 # rejection implies about the client's validation logic.
@@ -166,7 +212,7 @@ class PayloadWriter:
 class ProxyServer:
     def __init__(self, listen_port: int, session_dir: str, certs: CertificateFactory, state: State, log,
                  mode: str = "active", retest: str = "wait", no_payloads: bool = False,
-                 on_exhausted: str = "passthrough"):
+                 on_exhausted: str = "passthrough", strip_starttls: bool = False):
         self.listen_port = listen_port
         self.session_dir = Path(session_dir)
         self.certs = certs
@@ -176,6 +222,8 @@ class ProxyServer:
         self.retest = retest
         self.no_payloads = no_payloads
         self.on_exhausted = on_exhausted
+        self.strip_starttls = strip_starttls
+        self.failopen = FailOpenTracker()
         self.stop = threading.Event()
         self._counter = 0
         self._counter_lock = threading.Lock()
@@ -210,6 +258,11 @@ class ProxyServer:
                 self.log.emit("TLS_CLIENTHELLO", source="proxy", client=addr[0], dest=f"{dst_ip}:{dst_port}", sni=hello.sni or "none", alpn=",".join(hello.alpn) or None, versions=",".join(hello.offered_versions) or None, ja3=hello.ja3_hash)
                 return self._handle_tls(client, dst_ip, dst_port, hello)
             self.log.emit("TCP", client=addr[0], dest=f"{dst_ip}:{dst_port}", proto="plaintext")
+            hit = self.failopen.check_plaintext(dst_ip, dst_port)
+            if hit:
+                self.log.emit("FAIL_OPEN", dest=f"{dst_ip}:{dst_port}", tls_port=hit["tls_port"], sni=hit["sni"] or "none",
+                              finding="tls_failure_cleartext_fallback",
+                              msg="device retried in cleartext after TLS was refused")
             return self._forward(client, dst_ip, dst_port, downstream_tls=False, proto="tcp")
         except Exception as e:
             self.log.emit("ERROR", msg="proxy handler failed", error=str(e))
@@ -242,6 +295,7 @@ class ProxyServer:
         except Exception as e:
             alert = classify_tls_alert(str(e))
             self.state.record(key, Attempt(strategy, "rejected", str(e), alert=alert))
+            self.failopen.record_tls_reject(dst_ip, dst_port, sni)
             self.log.emit("TLS", dest=f"{dst_ip}:{dst_port}", sni=sni or "none", strategy=strategy, result="rejected", error=str(e), alert=alert, alert_meaning=_ALERT_MEANING.get(alert), remaining=self.state.remaining(key))
             if self.retest in ("rst", "auto"):
                 set_rst_on_close(client)
@@ -282,7 +336,8 @@ class ProxyServer:
                 self._capture_upstream_cert(upstream, dst_ip, dst_port, upstream_sni, payloads)
             if first_client_data:
                 upstream.sendall(first_client_data)
-            self._pump(client, upstream, payloads)
+            strip = self.strip_starttls and not downstream_tls and dst_port in STARTTLS_PORTS
+            self._pump(client, upstream, payloads, strip_starttls=strip)
         except Exception as e:
             self.log.emit("ERROR", msg="upstream connect/proxy failed", dest=f"{dst_ip}:{dst_port}", sni=upstream_sni or "none", error=str(e))
         finally:
@@ -334,18 +389,19 @@ class ProxyServer:
             except Exception:
                 pass
 
-    def _pump(self, client: socket.socket, upstream: socket.socket, payloads: PayloadWriter):
+    def _pump(self, client: socket.socket, upstream: socket.socket, payloads: PayloadWriter, strip_starttls: bool = False):
         sockets = [client, upstream]
+        stripped = [False]
         while True:
             readable, _, _ = select.select(sockets, [], [], IDLE_TIMEOUT)
             if not readable:
                 return
             for sock in readable:
-                if not self._drain(sock, client, upstream, payloads):
+                if not self._drain(sock, client, upstream, payloads, strip_starttls, stripped):
                     return
 
-    @staticmethod
-    def _drain(sock: socket.socket, client: socket.socket, upstream: socket.socket, payloads: PayloadWriter) -> bool:
+    def _drain(self, sock: socket.socket, client: socket.socket, upstream: socket.socket, payloads: PayloadWriter,
+               strip_starttls: bool = False, stripped: list | None = None) -> bool:
         """Read everything currently available on `sock` and forward it.
 
         Returns False when the connection should be torn down (EOF or fatal error).
@@ -368,6 +424,13 @@ class ProxyServer:
                     payloads.write_client(data)
                     upstream.sendall(data)
                 else:
+                    if strip_starttls:
+                        data, changed = strip_starttls_caps(data)
+                        if changed and stripped is not None and not stripped[0]:
+                            stripped[0] = True
+                            if self.log:
+                                self.log.emit("STARTTLS_STRIP", finding="opportunistic_tls_strippable",
+                                              msg="removed STARTTLS capability; session stays cleartext")
                     payloads.write_server(data)
                     client.sendall(data)
             except OSError:

