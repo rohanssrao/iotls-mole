@@ -1,6 +1,8 @@
 # IoTLS-Mole
 
-Linux-only transparent MITM harness for owned/lab IoT devices. It performs ARP gateway takeover, redirects target TCP flows to a local proxy, logs DNS/service metadata, and rotates TLS certificate-validation test strategies across successive reconnects.
+Transparent MITM harness for owned/lab IoT devices. It performs ARP gateway takeover, redirects target TCP flows to a local proxy, logs DNS/service metadata, and rotates TLS certificate-validation test strategies across successive reconnects.
+
+Linux is the primary, fully-tested platform (iptables + `SO_ORIGINAL_DST`). **macOS support is recon-only:** discovery/the device picker and passive monitoring (SNI/ALPN/JA3, DNS/mDNS/CoAP) work natively, but **transparent TLS interception does not work on macOS.** This is a macOS platform limitation, not a tool bug — the kernel does not deliver pf-`rdr`'d *forwarded* (ARP-spoofed) packets to a local listener (connections stall at `SYN_SENT`; the rewritten packet is dropped, never reflected to the local socket). Verified directly at the packet/state level that **bettercap's `http.proxy`/`https.proxy` fail identically on the same machine** (same `SYN_SENT`, proxies receive nothing while the target actively sends traffic), across every rdr-target/bind/forwarding combination. Use **Linux** for interception. (The proper macOS fix would be a `utun`-based datapath instead of pf-rdr-to-local-socket — a separate, substantial effort.)
 
 > Use only on devices/networks you own or are authorized to test.
 
@@ -96,7 +98,7 @@ MOLE_LAB_ARP=1 sudo -E env PATH="$PATH" bash lab/netns-smoke.sh   # exercise liv
 
 ## Notes
 
-- Linux IPv4 only for now.
+- IPv4 only for now. **Linux is fully tested and is the platform for interception.** macOS is recon-only (discovery + passive monitoring); transparent interception is a confirmed macOS limitation — see the note at the top.
 - One certificate strategy is tested per TLS connection attempt. Re-testing requires natural reconnects or `--retest rst|auto`.
 - Cert strategies each isolate one validation defect: `self-signed`, `private-ca` (unknown CA + wrong-host), `cn-only` (no SAN), `wildcard` (wildcard that can't match the host), `weak-key` (1024-bit RSA), `expired`, and `public-wrong-host` (needs `--cert/--key`). Select a subset with `--strategy`.
 - Rejections are classified by the client's TLS alert (`unknown_ca` → validates chain, `certificate_expired` → checks validity, etc.). Endpoints that reject everything with only opaque alerts are flagged as **likely certificate pinning**.

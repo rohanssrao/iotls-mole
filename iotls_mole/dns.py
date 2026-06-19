@@ -71,10 +71,12 @@ class DNSResponder:
 
     def __init__(self, env, log, listen_port: int, upstream: str,
                  suppress_aaaa: bool = True, spoof_ip: str | None = None,
-                 spoof_domains: list[str] | None = None, upstream_timeout: float = 3.0):
+                 spoof_domains: list[str] | None = None, upstream_timeout: float = 3.0,
+                 bind_host: str = "0.0.0.0"):
         self.env = env
         self.log = log
         self.listen_port = listen_port
+        self.bind_host = bind_host
         self.upstream = upstream
         self.suppress_aaaa = suppress_aaaa
         self.spoof_ip = spoof_ip
@@ -87,7 +89,7 @@ class DNSResponder:
     def start(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("0.0.0.0", self.listen_port))
+        self.sock.bind((self.bind_host, self.listen_port))
         self.sock.settimeout(1)
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()

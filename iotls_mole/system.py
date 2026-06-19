@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
-import re
 import shlex
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -16,18 +13,9 @@ from scapy.all import (  # type: ignore
 )
 
 from .coap import parse_coap
+from .netos import DOH_IPS, default_route, iface_ip, read_forwarding, require_root, run
 from .tlshello import dtls_version, looks_dtls_client_hello, looks_tls, parse_client_hello
 
-# Well-known DNS-over-HTTPS resolver IPs. Dropping TCP/443 to these forces the
-# device to fall back to plaintext :53 (which our DNS responder then owns).
-DOH_IPS = [
-    "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2",        # Cloudflare
-    "8.8.8.8", "8.8.4.4",                                # Google
-    "9.9.9.9", "149.112.112.112",                        # Quad9
-    "94.140.14.14", "94.140.15.15",                      # AdGuard
-    "208.67.222.222", "208.67.220.220",                  # OpenDNS
-    "185.228.168.9",                                      # CleanBrowsing
-]
 
 
 @dataclass
@@ -41,15 +29,6 @@ class Env:
     old_forward: str
 
 
-def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
-
-
-def require_root():
-    if os.geteuid() != 0:
-        raise SystemExit("iotls-mole must run as root for ARP spoofing/netfilter")
-
-
 def discover(target_ip: str) -> Env:
     gateway_ip, iface = default_route()
     return Env(
@@ -59,21 +38,8 @@ def discover(target_ip: str) -> Env:
         gateway_mac=mac_for(gateway_ip, iface),
         iface=iface,
         local_ip=iface_ip(iface),
-        old_forward=Path("/proc/sys/net/ipv4/ip_forward").read_text().strip(),
+        old_forward=read_forwarding(),
     )
-
-
-def default_route() -> tuple[str, str]:
-    line = run(["ip", "route", "show", "default"]).stdout.strip().splitlines()[0]
-    toks = line.split()
-    return toks[toks.index("via") + 1], toks[toks.index("dev") + 1]
-
-
-def iface_ip(iface: str) -> str:
-    out = run(["ip", "-4", "addr", "show", "dev", iface]).stdout
-    if m := re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", out):
-        return m.group(1)
-    raise RuntimeError(f"no IPv4 address on {iface}")
 
 
 def mac_for(ip: str, iface: str, timeout: int = 2) -> str:

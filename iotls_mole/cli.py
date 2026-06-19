@@ -27,7 +27,7 @@ FINDING_LABELS = {
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Transparent IoT TLS certificate-validation test harness")
-    p.add_argument("target_ip")
+    p.add_argument("target_ip", nargs="?", help="target device IP; omit to launch the interactive picker")
     p.add_argument("cert", nargs="?", help="optional operator public certificate/fullchain PEM")
     p.add_argument("key", nargs="?", help="optional operator private key PEM")
     p.add_argument("--cert", dest="cert_opt", help="operator public certificate/fullchain PEM")
@@ -67,7 +67,12 @@ def main(argv=None):
     from .certs import CertificateFactory
     from .dns import DNSResponder
     from .proxy import ProxyServer, State
+    from .netos import IS_MACOS
     from .system import ArpSpoofer, IPv6Suppressor, Netfilter, discover, require_root, start_dns_sniffer
+    Redirector = Netfilter
+    if IS_MACOS:
+        from .pf import PacketFilter
+        Redirector = PacketFilter
 
     args = parse_args(argv)
     print(BANNER, file=sys.stderr)
@@ -76,6 +81,16 @@ def main(argv=None):
     cert, key = args.cert_opt or args.cert, args.key_opt or args.key
     if bool(cert) != bool(key):
         raise SystemExit("provide both cert and key, or neither")
+
+    if not args.target_ip:
+        if args.cleanup_only:
+            raise SystemExit("--cleanup-only requires a target IP")
+        from .picker import pick_target
+        args.target_ip = pick_target()
+        if not args.target_ip:
+            print("no device selected", file=sys.stderr)
+            return 0
+        print(f"targeting {args.target_ip}", file=sys.stderr)
 
     session_dir = Path(args.out) if args.out else default_session_dir(args.target_ip)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -87,13 +102,13 @@ def main(argv=None):
     log.emit("INFO", msg="full event log", path=str(session_dir / "events.jsonl"))
 
     redirect_ports = parse_redirect_ports(args.redirect_ports)
-    nf: Netfilter | None = None
+    nf = None
     spoofer: ArpSpoofer | None = None
     dns_responder: DNSResponder | None = None
     ipv6_suppressor: IPv6Suppressor | None = None
 
     if args.cleanup_only:
-        Netfilter(env, args.listen_port, [], dns_port=args.dns_listen_port).purge_stale()
+        Redirector(env, args.listen_port, [], dns_port=args.dns_listen_port).purge_stale()
         log.emit("INFO", msg="cleanup_only_done", listen_port=args.listen_port)
         log.close()
         return 0
@@ -118,6 +133,7 @@ def main(argv=None):
         no_payloads=args.no_payloads,
         on_exhausted=args.on_exhausted,
         strip_starttls=funnel,
+        bind_host=env.local_ip if IS_MACOS else "0.0.0.0",
     )
 
     cleaned = False
@@ -157,11 +173,20 @@ def main(argv=None):
     start_dns_sniffer(env, log, stop, include_udp=args.include_udp, pcap_path=pcap_path)
 
     if args.mode == "active" and not args.no_netfilter:
-        nf = Netfilter(env, args.listen_port, redirect_ports, funnel=funnel, dns_port=dns_port)
+        nf = Redirector(env, args.listen_port, redirect_ports, funnel=funnel, dns_port=dns_port)
         nf.install()
         log.emit("INFO", msg="netfilter installed", redirect_ports=args.redirect_ports, funnel=funnel)
+        if IS_MACOS:
+            log.emit("WARN", msg=(
+                "macOS: transparent interception of ARP-spoofed traffic does NOT work \u2014 a macOS "
+                "limitation, not a tool bug. The kernel never delivers pf-rdr'd forwarded packets to "
+                "a local listener (connections stall at SYN_SENT; the rewritten packet is dropped). "
+                "Verified directly that bettercap's http/https proxy fails identically here. "
+                "Discovery and passive monitoring (SNI/ALPN/JA3/DNS/mDNS/CoAP) work; use Linux for "
+                "TLS interception."
+            ))
     elif not args.no_arp:
-        nf = Netfilter(env, args.listen_port, redirect_ports)
+        nf = Redirector(env, args.listen_port, redirect_ports)
         nf.enable_forwarding()
         log.emit("INFO", msg="ip_forward enabled")
 
@@ -169,7 +194,8 @@ def main(argv=None):
         upstream = args.dns_upstream or env.gateway_ip
         spoof_domains = [d.strip() for d in args.dns_spoof_domains.split(",") if d.strip()] if args.dns_spoof_domains else None
         dns_responder = DNSResponder(env, log, args.dns_listen_port, upstream,
-                                     suppress_aaaa=True, spoof_ip=args.dns_spoof_ip, spoof_domains=spoof_domains)
+                                     suppress_aaaa=True, spoof_ip=args.dns_spoof_ip, spoof_domains=spoof_domains,
+                                     bind_host=env.local_ip if IS_MACOS else "0.0.0.0")
         dns_responder.start()
         log.emit("INFO", msg="funnel active: QUIC/DoH/DoT blocked, DNS responder up", dns_upstream=upstream,
                  dns_spoof_ip=args.dns_spoof_ip, suppress_aaaa=True)

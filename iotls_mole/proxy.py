@@ -13,10 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .certs import CertificateFactory, describe_cert
+from .netos import original_dst
 from .scan import scan as scan_secrets
 from .tlshello import looks_tls, parse_client_hello
 
-SO_ORIGINAL_DST = 80
 BUFFER_SIZE = 65536
 IDLE_TIMEOUT = 60
 FIRST_APP_DATA_TIMEOUT = 3
@@ -145,11 +145,6 @@ class State:
         return self._states
 
 
-def original_dst(sock: socket.socket) -> tuple[str, int]:
-    data = sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-    return socket.inet_ntoa(data[4:8]), struct.unpack_from("!H", data, 2)[0]
-
-
 class PayloadWriter:
     def __init__(self, root: Path, session: str, metadata: dict, enabled: bool):
         self.path = root / session
@@ -212,8 +207,9 @@ class PayloadWriter:
 class ProxyServer:
     def __init__(self, listen_port: int, session_dir: str, certs: CertificateFactory, state: State, log,
                  mode: str = "active", retest: str = "wait", no_payloads: bool = False,
-                 on_exhausted: str = "passthrough", strip_starttls: bool = False):
+                 on_exhausted: str = "passthrough", strip_starttls: bool = False, bind_host: str = "0.0.0.0"):
         self.listen_port = listen_port
+        self.bind_host = bind_host
         self.session_dir = Path(session_dir)
         self.certs = certs
         self.state = state
@@ -232,7 +228,7 @@ class ProxyServer:
     def serve(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("0.0.0.0", self.listen_port))
+        listener.bind((self.bind_host, self.listen_port))
         listener.listen(128)
         listener.settimeout(1)
         self.log.emit("INFO", msg="proxy listening", port=self.listen_port)
