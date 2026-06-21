@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -23,13 +24,27 @@ DOH_IPS = [
 ]
 
 
-def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+def run(cmd: list[str], check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, input=input_text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+
+def detect_firewall(prefer: str = "auto") -> str:
+    """Pick the firewall backend: 'pf' on macOS, else 'iptables' (preferred when
+    present, most-tested) or native 'nft'. `prefer` forces a Linux backend."""
+    if IS_MACOS:
+        return "pf"
+    if prefer in ("iptables", "nft"):
+        return prefer
+    if shutil.which("iptables"):
+        return "iptables"
+    if shutil.which("nft"):
+        return "nft"
+    raise SystemExit("no supported firewall backend found (need iptables or nft)")
 
 
 def require_root():
     if os.geteuid() != 0:
-        raise SystemExit("iotls-mole must run as root for ARP spoofing / packet redirection")
+        raise SystemExit("trustfall must run as root for ARP spoofing / packet redirection")
 
 
 # --- default route / interface discovery -------------------------------------

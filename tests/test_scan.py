@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from iotls_mole.scan import scan
+from trustfall.scan import scan
 
 
 def test_scan_finds_common_secrets():

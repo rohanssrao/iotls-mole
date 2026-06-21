@@ -15,6 +15,7 @@ from scapy.all import (  # type: ignore
 from .coap import parse_coap
 from .netos import DOH_IPS, default_route, iface_ip, read_forwarding, require_root, run
 from .tlshello import dtls_version, looks_dtls_client_hello, looks_tls, parse_client_hello
+from . import APP
 
 
 
@@ -221,7 +222,7 @@ class Netfilter:
         Path("/proc/sys/net/ipv4/ip_forward").write_text(self.env.old_forward + "\n")
 
     def purge_stale(self):
-        """Best-effort removal of IoTLS-Mole rules from previous runs."""
+        """Best-effort removal of Trustfall rules from previous runs."""
         e = self.env
         exact_filter_specs = [
             ["INPUT", "-i", e.iface, "-s", e.target_ip, "-p", "tcp", "--dport", str(self.port), "-j", "ACCEPT"],
@@ -309,6 +310,96 @@ class Netfilter:
             if table != "filter":
                 cmd[1:1] = ["-t", table]
             self._delete_all(cmd)
+
+
+class NfTables:
+    """Native nftables backend mirroring the Netfilter (iptables) interface.
+
+    Everything lives in one dedicated `ip trustfall` table, so teardown is a
+    single atomic `nft delete table`. Redirect/funnel/DNS behaviour matches the
+    iptables backend.
+
+    Caveat: nftables base chains don't short-circuit each other the way an
+    iptables `-I FORWARD 1 ACCEPT` does. A `drop` in any base chain at a hook
+    wins, so if the host already runs a forward chain with a drop policy that
+    doesn't match the target, our accept can't override it. Works as-is on hosts
+    with default-accept forwarding (or no forward filtering); otherwise the
+    target must be allowed to forward in the host ruleset.
+    """
+
+    TABLE = APP
+
+    def __init__(self, env: Env, port: int, redirect_ports: list[int] | None = None,
+                 funnel: bool = False, dns_port: int = 0):
+        self.env = env
+        self.port = port
+        self.redirect_ports = redirect_ports or []
+        self.funnel = funnel
+        self.dns_port = dns_port
+
+    def enable_forwarding(self):
+        Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n")
+
+    def install(self):
+        self.enable_forwarding()
+        self.purge_stale()
+        run(["nft", "-f", "-"], input_text=self._ruleset())
+
+    def cleanup(self):
+        self.purge_stale()
+        Path("/proc/sys/net/ipv4/ip_forward").write_text(self.env.old_forward + "\n")
+
+    def purge_stale(self):
+        """Idempotent removal of our table left over from a previous run."""
+        run(["nft", "delete", "table", "ip", self.TABLE], check=False)
+
+    def _ruleset(self) -> str:
+        return "\n".join(self._ruleset_lines()) + "\n"
+
+    def _ruleset_lines(self) -> list[str]:
+        e = self.env
+        input_rules = [f"ip saddr {e.target_ip} tcp dport {self.port} accept"]
+        if self.dns_port:
+            input_rules.append(f"ip saddr {e.target_ip} udp dport {self.dns_port} accept")
+        # funnel drops first (terminal), then broad target accepts
+        forward_rules = self._funnel_rules() + [
+            f"ip saddr {e.target_ip} accept",
+            f"ip daddr {e.target_ip} accept",
+        ]
+        lines = [f"table ip {self.TABLE} {{"]
+        lines += self._chain("prerouting", "type nat hook prerouting priority dstnat; policy accept;", self._redirect_rules())
+        lines += self._chain("input", "type filter hook input priority filter; policy accept;", input_rules)
+        lines += self._chain("forward", "type filter hook forward priority filter; policy accept;", forward_rules)
+        lines.append("}")
+        return lines
+
+    @staticmethod
+    def _chain(name: str, header: str, rules: list[str]) -> list[str]:
+        return [f"  chain {name} {{", f"    {header}", *[f"    {r}" for r in rules], "  }"]
+
+    def _redirect_rules(self) -> list[str]:
+        e = self.env
+        if self.redirect_ports:
+            ports = ", ".join(str(p) for p in self.redirect_ports)
+            rules = [f"ip saddr {e.target_ip} tcp dport {{ {ports} }} redirect to :{self.port}"]
+        else:
+            rules = [f"ip saddr {e.target_ip} tcp redirect to :{self.port}"]
+        if self.dns_port:
+            rules.append(f"ip saddr {e.target_ip} udp dport 53 redirect to :{self.dns_port}")
+        return rules
+
+    def _funnel_rules(self) -> list[str]:
+        """DROP transports that bypass TCP+TLS interception (mirrors Netfilter)."""
+        if not self.funnel:
+            return []
+        e = self.env
+        doh = ", ".join(DOH_IPS)
+        return [
+            f"ip saddr {e.target_ip} udp dport 443 drop",   # QUIC/HTTP3
+            f"ip saddr {e.target_ip} udp dport 853 drop",   # DoQ
+            f"ip saddr {e.target_ip} tcp dport 853 drop",   # DoT
+            f"ip saddr {e.target_ip} ip daddr {{ {doh} }} tcp dport 443 drop",  # DoH
+        ]
 
 
 def start_dns_sniffer(env: Env, log, stop: threading.Event, include_udp: bool = False, pcap_path: str | None = None):

@@ -3,7 +3,7 @@ from __future__ import annotations
 from scapy.all import ICMPv6ND_RA, IPv6, UDP, IP, Ether
 from scapy.layers.dns import DNS, DNSQR
 
-from iotls_mole.system import build_ra_kill, handle_packet, handle_udp
+from trustfall.system import build_ra_kill, handle_packet, handle_udp
 
 
 class FakeLog:

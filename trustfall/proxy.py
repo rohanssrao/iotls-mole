@@ -207,9 +207,11 @@ class PayloadWriter:
 class ProxyServer:
     def __init__(self, listen_port: int, session_dir: str, certs: CertificateFactory, state: State, log,
                  mode: str = "active", retest: str = "wait", no_payloads: bool = False,
-                 on_exhausted: str = "passthrough", strip_starttls: bool = False, bind_host: str = "0.0.0.0"):
+                 on_exhausted: str = "passthrough", strip_starttls: bool = False, bind_host: str = "0.0.0.0",
+                 keylog_path: str | None = None):
         self.listen_port = listen_port
         self.bind_host = bind_host
+        self.keylog_path = keylog_path
         self.session_dir = Path(session_dir)
         self.certs = certs
         self.state = state
@@ -286,6 +288,7 @@ class ProxyServer:
         material = self.certs.material_for(strategy, sni, dst_ip)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(material.certfile, material.keyfile)
+        self._apply_keylog(context)
         try:
             tls_client = context.wrap_socket(client, server_side=True)
         except Exception as e:
@@ -327,6 +330,7 @@ class ProxyServer:
             upstream.connect((dst_ip, dst_port))
             if downstream_tls:
                 context = ssl._create_unverified_context()
+                self._apply_keylog(context)
                 upstream = context.wrap_socket(upstream, server_hostname=upstream_sni or None)
                 self.log.emit("UPSTREAM_TLS", dest=f"{dst_ip}:{dst_port}", sni=upstream_sni or "none", tls=upstream.version(), cipher=(upstream.cipher() or [None])[0])
                 self._capture_upstream_cert(upstream, dst_ip, dst_port, upstream_sni, payloads)
@@ -370,6 +374,19 @@ class ProxyServer:
             not_after=info["not_after"],
             sans=",".join(info["sans"]) or None,
         )
+
+    def _apply_keylog(self, context: ssl.SSLContext):
+        """Write TLS secrets to an NSS key log so the pcap is decryptable in Wireshark.
+
+        We terminate both TLS legs, so this records CLIENT_RANDOM entries for the
+        client<->proxy handshake (captured on the wire) and the proxy<->upstream one.
+        """
+        if not self.keylog_path:
+            return
+        try:
+            context.keylog_filename = self.keylog_path
+        except (AttributeError, OSError):
+            pass
 
     def _read_initial_app_data(self, client: socket.socket, sni: str | None) -> tuple[bytes, str | None]:
         old_timeout = client.gettimeout()

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from iotls_mole.cli import parse_redirect_ports
-from iotls_mole.proxy import http_host
-from iotls_mole.system import Netfilter, classify_udp
+from trustfall.cli import parse_redirect_ports
+from trustfall.proxy import http_host
+from trustfall.system import Netfilter, classify_udp
 
 
 def test_http_host_variants():

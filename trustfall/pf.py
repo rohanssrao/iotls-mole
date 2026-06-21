@@ -38,7 +38,7 @@ class PacketFilter:
     def install(self):
         self.enable_forwarding()
         self._was_enabled = "Status: Enabled" in run(["pfctl", "-s", "info"], check=False).stdout
-        fd, path = tempfile.mkstemp(prefix="iotls-mole-pf-", suffix=".conf")
+        fd, path = tempfile.mkstemp(prefix="trustfall-pf-", suffix=".conf")
         Path(path).write_text(self.ruleset())
         self._conf_path = path
         run(["pfctl", "-f", path])

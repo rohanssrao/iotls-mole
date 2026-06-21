@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from scapy.all import DNS, DNSQR, DNSRR
 
-from iotls_mole.dns import (
+from trustfall.dns import (
     DNSResponder,
     build_nodata,
     build_spoofed_a,

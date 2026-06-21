@@ -93,7 +93,7 @@ class CertificateFactory:
         self._locks: dict[tuple[str, str], threading.Lock] = defaultdict(threading.Lock)
         self._locks_guard = threading.Lock()
         self._ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "IoTLS-Mole Ephemeral CA")])
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Trustfall Ephemeral CA")])
         now = dt.datetime.now(dt.UTC)
         self._ca_cert = (
             x509.CertificateBuilder()
@@ -129,7 +129,7 @@ class CertificateFactory:
 
     def material_for(self, strategy: str, sni: str | None, dest_ip: str) -> CertMaterial:
         host = sni or dest_ip
-        wrong = "wrong-host.iotls-mole.invalid"
+        wrong = "wrong-host.trustfall.invalid"
         if strategy == "public_wrong_host":
             if not self.operator_cert or not self.operator_key:
                 raise ValueError("public_wrong_host requires --cert and --key")

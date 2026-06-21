@@ -5,7 +5,7 @@ import io
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from iotls_mole.show import show_session
+from trustfall.show import show_session
 
 
 def _make_session(root: Path, name: str, client: bytes, server: bytes):
@@ -43,6 +43,6 @@ def test_grep_filters_out_nonmatching(tmp_path):
 
 
 def test_grep_ignore_case(tmp_path):
-    d = _make_session(tmp_path, "0003", b"X-IoTLS-Mole-Test: TOKEN-XYZ", b"")
+    d = _make_session(tmp_path, "0003", b"X-Trustfall-Test: TOKEN-XYZ", b"")
     assert _render(d, _args(grep="token-xyz", ignore_case=True))[0] is True
     assert _render(d, _args(grep="token-xyz", ignore_case=False))[0] is False

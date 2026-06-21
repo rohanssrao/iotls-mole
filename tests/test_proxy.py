@@ -7,9 +7,9 @@ import threading
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from iotls_mole.certs import CertificateFactory, describe_cert
-from iotls_mole.logging import _BoundedSet
-from iotls_mole.proxy import PayloadWriter, ProxyServer, State
+from trustfall.certs import CertificateFactory, describe_cert
+from trustfall.logging import _BoundedSet
+from trustfall.proxy import PayloadWriter, ProxyServer, State
 
 
 def _der_for(factory: CertificateFactory, strategy: str, host: str) -> bytes:
@@ -22,7 +22,7 @@ def test_describe_cert_private_ca(tmp_path):
     factory = CertificateFactory(str(tmp_path))
     info = describe_cert(_der_for(factory, "private_ca_match", "cam.lan"))
     assert info["subject_cn"] == "cam.lan"
-    assert info["issuer_cn"] == "IoTLS-Mole Ephemeral CA"
+    assert info["issuer_cn"] == "Trustfall Ephemeral CA"
     assert info["self_signed"] is False
     assert info["expired"] is False
     assert "cam.lan" in info["sans"]

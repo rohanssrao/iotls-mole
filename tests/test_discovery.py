@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import time
 
-from iotls_mole.discovery import Host, HostTracker, ip_in_scope, vendor_for
+from trustfall.discovery import Host, HostTracker, ip_in_scope, vendor_for
 
 
 def test_ip_in_scope_filters_noise():
@@ -27,7 +27,7 @@ def test_vendor_for_bundled_and_injected():
 
 def test_vendor_for_ignores_mac_echoed_by_scapy(monkeypatch):
     # scapy's manuf lookup echoes the input MAC on a miss; that must not become a vendor.
-    import iotls_mole.discovery as d
+    import trustfall.discovery as d
     monkeypatch.setattr(d, "_scapy_vendor", lambda mac: mac)
     assert d.vendor_for("16:52:1d:3d:17:ef") == ""
 

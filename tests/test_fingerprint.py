@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from iotls_mole.proxy import PINNING_ALERTS, classify_tls_alert
-from iotls_mole.tlshello import is_grease, parse_client_hello
+from trustfall.proxy import PINNING_ALERTS, classify_tls_alert
+from trustfall.tlshello import is_grease, parse_client_hello
 from tests.test_tlshello import build_client_hello
 
 

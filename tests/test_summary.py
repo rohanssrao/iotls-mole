@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from iotls_mole.cli import build_inventory, build_summary
-from iotls_mole.proxy import Attempt, State
+from trustfall.cli import build_inventory, build_summary
+from trustfall.proxy import Attempt, State
 
 
 def _state_with_finding(tmp_dir):

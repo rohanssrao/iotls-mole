@@ -62,7 +62,7 @@ def show_session(d: Path, args) -> bool:
     return True
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="iotls-mole show", description="Show captured plaintext/decrypted payloads from a session directory")
+    ap = argparse.ArgumentParser(prog="trustfall show", description="Show captured plaintext/decrypted payloads from a session directory")
     ap.add_argument("session_dir")
     ap.add_argument("--session", help="show one session id/name")
     ap.add_argument("--all", action="store_true", help="show binary-looking sessions too")

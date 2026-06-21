@@ -9,9 +9,10 @@ import threading
 import time
 from pathlib import Path
 
+from . import APP, __version__
 from .logging import EventLogger
 
-BANNER = "IoTLS-Mole: use only on devices/networks you own or are authorized to test."
+BANNER = f"{APP.capitalize()}: use only on devices/networks you own or are authorized to test."
 DEFAULT_REDIRECT_PORTS = "80,443,8080,8443,8883"
 FINDING_LABELS = {
     "self_signed_match": "HIGH missing chain validation",
@@ -26,7 +27,8 @@ FINDING_LABELS = {
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Transparent IoT TLS certificate-validation test harness")
+    p = argparse.ArgumentParser(prog=APP, description="Transparent IoT TLS certificate-validation test harness")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("target_ip", nargs="?", help="target device IP; omit to launch the interactive picker")
     p.add_argument("cert", nargs="?", help="optional operator public certificate/fullchain PEM")
     p.add_argument("key", nargs="?", help="optional operator private key PEM")
@@ -39,14 +41,15 @@ def parse_args(argv=None):
     p.add_argument("--jsonl", action="store_true", help="emit full JSONL event stream on stdout")
     p.add_argument("--verbose", action="store_true", help="show low-level DNS/TCP/TLS events on stdout")
     p.add_argument("--quiet", action="store_true", help="only print important findings and final summary")
-    p.add_argument("--pcap", action="store_true", help="write all target packets to capture.pcap in the session dir")
+    p.add_argument("--pcap", action=argparse.BooleanOptionalAction, default=True, help="write all target packets to capture.pcap in the session dir (default: on; intercepted-TLS legs are decryptable via the sslkeys.log NSS key log)")
     p.add_argument("--no-payloads", action="store_true")
     p.add_argument("--out", help="output/session directory")
     p.add_argument("--include-udp", action="store_true")
     p.add_argument("--listen-port", type=int, default=9900)
     p.add_argument("--redirect-ports", default=DEFAULT_REDIRECT_PORTS, help="comma-separated TCP destination ports to redirect; use 'all' for all TCP")
     p.add_argument("--on-exhausted", choices=["passthrough", "close"], default="passthrough", help="what to do after all cert strategies are exhausted for an endpoint")
-    p.add_argument("--no-netfilter", action="store_true", help="do not install iptables redirect rules")
+    p.add_argument("--no-netfilter", action="store_true", help="do not install firewall redirect rules")
+    p.add_argument("--firewall", choices=["auto", "iptables", "nft"], default="auto", help="Linux firewall backend (default: auto \u2014 iptables if present, else native nftables)")
     p.add_argument("--no-arp", action="store_true", help="do not ARP spoof; useful if target already routes through this host")
     p.add_argument("--funnel", action=argparse.BooleanOptionalAction, default=True, help="block QUIC/DoH/DoT and run a DNS responder to funnel traffic into the interceptable TCP+TLS path (default: on in active mode)")
     p.add_argument("--dns-spoof-ip", help="answer A queries with this IP (full DNS redirection); default is passthrough resolve with AAAA suppressed")
@@ -54,7 +57,7 @@ def parse_args(argv=None):
     p.add_argument("--dns-upstream", help="upstream resolver for DNS passthrough (default: gateway)")
     p.add_argument("--dns-listen-port", type=int, default=9953)
     p.add_argument("--suppress-ipv6", action="store_true", help="RA-kill the real IPv6 router so the target falls back to IPv4 (aggressive, LAN-wide)")
-    p.add_argument("--cleanup-only", action="store_true", help="discover target/interface, purge IoTLS-Mole netfilter rules, restore forwarding, then exit")
+    p.add_argument("--cleanup-only", action="store_true", help="discover target/interface, purge Trustfall netfilter rules, restore forwarding, then exit")
     return p.parse_args(argv)
 
 
@@ -67,16 +70,18 @@ def main(argv=None):
     from .certs import CertificateFactory
     from .dns import DNSResponder
     from .proxy import ProxyServer, State
-    from .netos import IS_MACOS
-    from .system import ArpSpoofer, IPv6Suppressor, Netfilter, discover, require_root, start_dns_sniffer
-    Redirector = Netfilter
-    if IS_MACOS:
-        from .pf import PacketFilter
-        Redirector = PacketFilter
+    from .netos import IS_MACOS, detect_firewall
+    from .system import ArpSpoofer, IPv6Suppressor, Netfilter, NfTables, discover, require_root, start_dns_sniffer
 
     args = parse_args(argv)
     print(BANNER, file=sys.stderr)
     require_root()
+
+    backend = detect_firewall(args.firewall)
+    Redirector = {"nft": NfTables, "iptables": Netfilter}.get(backend, Netfilter)
+    if backend == "pf":
+        from .pf import PacketFilter
+        Redirector = PacketFilter
 
     cert, key = args.cert_opt or args.cert, args.key_opt or args.key
     if bool(cert) != bool(key):
@@ -122,6 +127,7 @@ def main(argv=None):
     state = State(strategies, stop_on_success=not args.continue_after_success)
     funnel = args.funnel and args.mode == "active" and not args.no_netfilter
     dns_port = args.dns_listen_port if funnel else 0
+    keylog_path = str(session_dir / "sslkeys.log") if args.pcap else None
     proxy = ProxyServer(
         args.listen_port,
         str(session_dir),
@@ -134,6 +140,7 @@ def main(argv=None):
         on_exhausted=args.on_exhausted,
         strip_starttls=funnel,
         bind_host=env.local_ip if IS_MACOS else "0.0.0.0",
+        keylog_path=keylog_path,
     )
 
     cleaned = False
@@ -169,13 +176,14 @@ def main(argv=None):
 
     pcap_path = str(session_dir / "capture.pcap") if args.pcap else None
     if pcap_path:
-        log.emit("INFO", msg="pcap enabled", path=pcap_path)
+        log.emit("INFO", msg="pcap enabled", path=pcap_path, keylog=keylog_path,
+                 hint="open in Wireshark; set TLS (Pre)-Master-Secret log to sslkeys.log to decrypt intercepted TLS")
     start_dns_sniffer(env, log, stop, include_udp=args.include_udp, pcap_path=pcap_path)
 
     if args.mode == "active" and not args.no_netfilter:
         nf = Redirector(env, args.listen_port, redirect_ports, funnel=funnel, dns_port=dns_port)
         nf.install()
-        log.emit("INFO", msg="netfilter installed", redirect_ports=args.redirect_ports, funnel=funnel)
+        log.emit("INFO", msg="netfilter installed", backend=backend, redirect_ports=args.redirect_ports, funnel=funnel)
         if IS_MACOS:
             log.emit("WARN", msg=(
                 "macOS: transparent interception of ARP-spoofed traffic does NOT work \u2014 a macOS "
@@ -184,6 +192,12 @@ def main(argv=None):
                 "Verified directly that bettercap's http/https proxy fails identically here. "
                 "Discovery and passive monitoring (SNI/ALPN/JA3/DNS/mDNS/CoAP) work; use Linux for "
                 "TLS interception."
+            ))
+        elif backend == "nft":
+            log.emit("INFO", msg=(
+                "nftables backend active (table 'ip trustfall'). If the host already runs a forward "
+                "chain with a drop policy, allow the target to forward \u2014 nft base chains don't "
+                "override one another. Inspect with `nft list ruleset`."
             ))
     elif not args.no_arp:
         nf = Redirector(env, args.listen_port, redirect_ports)
@@ -221,7 +235,7 @@ def main(argv=None):
 
 
 def default_session_dir(target_ip: str) -> Path:
-    return Path("sessions") / f"{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}_{target_ip}"
+    return Path("out") / f"{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}_{target_ip}"
 
 
 def parse_redirect_ports(value: str) -> list[int]:
@@ -343,7 +357,7 @@ def print_summary(log: EventLogger, state: State, session_dir: Path):
             rejected.append((ip, port, sni, attempts, ep["likely_pinning"]))
         log.emit("SUMMARY_TLS", endpoint=f"{ip}:{port}", sni=sni or "none", attempts=attempts, finding=ep["finding"], likely_pinning=ep["likely_pinning"] or None)
 
-    lines = ["IoTLS-Mole Summary", "==================", "", f"Session dir: {session_dir}", "", f"Findings: {len(findings)}"]
+    lines = ["Trustfall Summary", "==================", "", f"Session dir: {session_dir}", "", f"Findings: {len(findings)}"]
     for ip, port, sni, strategy, finding, attempts in findings:
         lines += [f"  {finding}", f"    endpoint: {ip}:{port}", f"    sni: {sni or 'none'}", f"    accepted_strategy: {strategy}", f"    attempts: {attempts}", ""]
     lines.append(f"Rejected TLS endpoints: {len(rejected)}")
@@ -368,14 +382,14 @@ def print_summary(log: EventLogger, state: State, session_dir: Path):
             lines.append(f"  HIGH STARTTLS strippable: {st['dest']} (stayed cleartext after capability removed)")
         for src in bf["ipv6_escape"]:
             lines.append(f"  INFO IPv6 escape: {src} (traffic outside IPv4 ARP scope; use --suppress-ipv6)")
-    lines += ["", "Files:", f"  events: {session_dir / 'events.jsonl'}", f"  summary: {session_dir / 'summary.txt'}", f"  summary (json): {session_dir / 'summary.json'}", f"  show payloads: uv run iotls-mole show {session_dir}"]
+    lines += ["", "Files:", f"  events: {session_dir / 'events.jsonl'}", f"  summary: {session_dir / 'summary.txt'}", f"  summary (json): {session_dir / 'summary.json'}", f"  show payloads: uv run {APP} show {session_dir}"]
 
     summary = "\n".join(lines) + "\n"
     (session_dir / "summary.txt").write_text(summary)
     (session_dir / "summary.json").write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     log.emit("SUMMARY", session_dir=str(session_dir), summary=str(session_dir / "summary.txt"), summary_json=str(session_dir / "summary.json"))
     print(f"\n{summary}", flush=True)
-    print(f"To view captured plaintext/decrypted payloads:\n  uv run iotls-mole show {session_dir}\n", flush=True)
+    print(f"To view captured plaintext/decrypted payloads:\n  uv run {APP} show {session_dir}\n", flush=True)
 
 
 if __name__ == "__main__":

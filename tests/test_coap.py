@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from iotls_mole.coap import is_coap, parse_coap
-from iotls_mole.tlshello import dtls_version, looks_dtls_client_hello
+from trustfall.coap import is_coap, parse_coap
+from trustfall.tlshello import dtls_version, looks_dtls_client_hello
 
 
 def _build_coap(code=1, mtype=0, mid=0xBEEF, token=b"", path=(), query=(), payload=b"", cf=None):

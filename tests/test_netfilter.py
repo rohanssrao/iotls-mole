@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from iotls_mole.system import DOH_IPS, Env, Netfilter
+from trustfall.system import DOH_IPS, Env, Netfilter
 
 
 def _env():

@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import time
 
-from iotls_mole.cli import build_summary
-from iotls_mole.proxy import FailOpenTracker, State, strip_starttls_caps
+from trustfall.cli import build_summary
+from trustfall.proxy import FailOpenTracker, State, strip_starttls_caps
 
 
 def test_strip_starttls_caps_equal_length():

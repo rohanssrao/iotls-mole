@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Dependency-less IoTLS-Mole client test script for Termux/Android.
+Dependency-less Trustfall client test script for Termux/Android.
 
-Run from Termux while IoTLS-Mole targets the phone's IPv4 address:
+Run from Termux while Trustfall targets the phone's IPv4 address:
 
     python3 termux_client_tests.py
 
@@ -32,8 +32,8 @@ def http_get(host: str, port: int, path: str, token: str, timeout: float = 10) -
     req = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
-        f"User-Agent: iotls-mole-termux-test/1.0\r\n"
-        f"X-IoTLS-Mole-Test: {token}\r\n"
+        f"User-Agent: trustfall-termux-test/1.0\r\n"
+        f"X-Trustfall-Test: {token}\r\n"
         f"Connection: close\r\n\r\n"
     ).encode()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,8 +51,8 @@ def https_get(host: str, path: str, token: str, verify: bool, sni: bool = True, 
     req = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
-        f"User-Agent: iotls-mole-termux-test/1.0\r\n"
-        f"X-IoTLS-Mole-Test: {token}\r\n"
+        f"User-Agent: trustfall-termux-test/1.0\r\n"
+        f"X-Trustfall-Test: {token}\r\n"
         f"Connection: close\r\n\r\n"
     ).encode()
     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -101,7 +101,7 @@ def first_line(data: bytes) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="IoTLS-Mole Termux client tests")
+    ap = argparse.ArgumentParser(description="Trustfall Termux client tests")
     ap.add_argument("--http-host", default="example.com")
     ap.add_argument("--https-strict-host", default="example.com")
     ap.add_argument("--https-insecure-host", default="www.example.com")
@@ -110,9 +110,9 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=10)
     args = ap.parse_args(argv)
 
-    token = "iotls-" + uuid.uuid4().hex[:12]
-    path = f"/iotls-mole-test/{token}"
-    print(f"IoTLS-Mole client test token: {token}")
+    token = "trustfall-" + uuid.uuid4().hex[:12]
+    path = f"/trustfall-test/{token}"
+    print(f"Trustfall client test token: {token}")
     print("Search captured payloads with:")
     print(f"  grep -RIna {token!r} <session-dir>")
     print()
@@ -126,7 +126,7 @@ def main(argv=None) -> int:
 
     time.sleep(0.5)
 
-    # 2. Strict HTTPS should fail under IoTLS-Mole active MITM.
+    # 2. Strict HTTPS should fail under Trustfall active MITM.
     try:
         data = https_get(args.https_strict_host, path + "/strict", token + "-strict", verify=True, sni=True, timeout=args.timeout)
         show_result("strict HTTPS rejection", False, "connection succeeded; MITM may not be active for this endpoint: " + first_line(data))
@@ -169,7 +169,7 @@ def main(argv=None) -> int:
         time.sleep(0.3)
 
     print()
-    print("Done. On the IoTLS-Mole host, look for:")
+    print("Done. On the Trustfall host, look for:")
     print(f"  grep -RIna {token!r} <session-dir>")
     print("Expected tokens in decrypted/plaintext captures:")
     print(f"  {token}-plaintext")

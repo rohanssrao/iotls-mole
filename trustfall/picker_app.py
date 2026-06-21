@@ -32,7 +32,7 @@ class DevicePicker(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "IoTLS-Mole"
+        self.title = "Trustfall"
         self.sub_title = f"select a target on {self.iface}  (\u2191\u2193 + Enter)"
         table = self.query_one(DataTable)
         for col in COLUMNS:

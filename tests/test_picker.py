@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from iotls_mole.discovery import HostTracker
-from iotls_mole.picker import _ago, _build_app
+from trustfall.discovery import HostTracker
+from trustfall.picker import _ago, _build_app
 
 
 def _run(coro):

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Non-destructive Linux network-namespace smoke test for IoTLS-Mole.
+# Non-destructive Linux network-namespace smoke test for Trustfall.
 # Creates isolated namespaces: gw, target, mole on an isolated bridge.
 # Requires: root, iproute2, iptables, python3, openssl, and Python deps
 # cryptography+scapy installed either system-wide or in the active environment.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BR="iotls-br0"
-GW_NS="iotls-gw"
-TARGET_NS="iotls-target"
-MOLE_NS="iotls-mole-ns"
+BR="trustfall-br0"
+GW_NS="trustfall-gw"
+TARGET_NS="trustfall-target"
+MOLE_NS="trustfall-ns"
 NET="10.13.37"
 SESSION="${ROOT}/lab/session-$(date +%s)"
 PIDS=()
@@ -30,7 +30,9 @@ trap cleanup EXIT
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
 [ "$(id -u)" = 0 ] || { echo "run as root (use: sudo -E bash lab/netns-smoke.sh)" >&2; exit 1; }
-need ip; need iptables; need python3; need openssl
+need ip; need python3; need openssl
+MOLE_FW="${MOLE_FW:-auto}"   # firewall backend: auto|iptables|nft
+case "$MOLE_FW" in nft) need nft ;; iptables) need iptables ;; *) command -v iptables >/dev/null || command -v nft >/dev/null || { echo "missing iptables/nft" >&2; exit 1; } ;; esac
 UV="$(command -v uv || true)"
 [ -n "$UV" ] || { echo "uv not found in PATH; run via: sudo -E env PATH=\"\$PATH\" bash lab/netns-smoke.sh" >&2; exit 1; }
 # Prepare the project venv once (needs network) so the in-namespace `uv run
@@ -102,10 +104,10 @@ sed -i "s#/SESSION#${SESSION}#g" "$SESSION/server.py"
 ip netns exec "$GW_NS" python3 "$SESSION/server.py" & PIDS+=("$!")
 sleep 1
 
-# Start IoTLS-Mole in the mole namespace. ARP spoofing and iptables happen only
+# Start Trustfall in the mole namespace. ARP spoofing and iptables happen only
 # inside the isolated lab namespaces/bridge.
-ip netns exec "$MOLE_NS" "$UV" run --no-sync --project "$ROOT" python -m iotls_mole.cli "$NET.10" \
-  --out "$SESSION/mole" --include-udp --retest wait --jsonl $MOLE_ARP_FLAG >"$SESSION/mole.log" 2>"$SESSION/mole.err" & PIDS+=("$!")
+ip netns exec "$MOLE_NS" "$UV" run --no-sync --project "$ROOT" python -m trustfall.cli "$NET.10" \
+  --out "$SESSION/mole" --include-udp --retest wait --jsonl --firewall "$MOLE_FW" $MOLE_ARP_FLAG >"$SESSION/mole.log" 2>"$SESSION/mole.err" & PIDS+=("$!")
 MOLE_PID="$!"
 for i in $(seq 1 20); do
   if grep -q 'arp_spoofing started\|proxy listening' "$SESSION/mole.log" 2>/dev/null; then break; fi

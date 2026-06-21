@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe macOS validation for IoTLS-Mole's platform layer.
+"""Safe macOS validation for Trustfall's platform layer.
 
 Runs as root but is NON-DESTRUCTIVE:
   * discovery: sends ARP who-has on the default interface (like any LAN scanner)
@@ -19,9 +19,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from iotls_mole.discovery import HostTracker, Probe
-from iotls_mole.netos import default_route, iface_cidr
-from iotls_mole.pf import PacketFilter
+from trustfall.discovery import HostTracker, Probe
+from trustfall.netos import default_route, iface_cidr
+from trustfall.pf import PacketFilter
 
 
 def main() -> int:

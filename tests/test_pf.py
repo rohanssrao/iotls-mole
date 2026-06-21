@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from iotls_mole.netos import DOH_IPS
-from iotls_mole.pf import PacketFilter
+from trustfall.netos import DOH_IPS
+from trustfall.pf import PacketFilter
 
 
 def _env():
@@ -49,7 +49,7 @@ def test_ruleset_translation_before_filtering():
 
 def test_packetfilter_matches_netfilter_constructor():
     # Both backends must be drop-in for the CLI factory.
-    from iotls_mole.system import Netfilter
+    from trustfall.system import Netfilter
     import inspect
     pf = set(inspect.signature(PacketFilter.__init__).parameters)
     nf = set(inspect.signature(Netfilter.__init__).parameters)

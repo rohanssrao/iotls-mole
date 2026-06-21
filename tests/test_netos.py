@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from iotls_mole import netos
+from trustfall import netos
 
 
 def test_parse_linux_default_route():

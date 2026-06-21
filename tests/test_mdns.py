@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from scapy.all import DNS, DNSQR, DNSRR, IP, UDP
 
-from iotls_mole.system import classify_udp, handle_packet
+from trustfall.system import classify_udp, handle_packet
 
 
 class FakeLog:

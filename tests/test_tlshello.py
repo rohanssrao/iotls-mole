@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 
-from iotls_mole.tlshello import looks_tls, parse_client_hello
+from trustfall.tlshello import looks_tls, parse_client_hello
 
 
 def _ext(ext_type: int, body: bytes) -> bytes:

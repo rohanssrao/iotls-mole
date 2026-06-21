@@ -6,7 +6,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
-from iotls_mole.certs import CertificateFactory
+from trustfall.certs import CertificateFactory
 
 
 def _load_pems(path: str) -> list[x509.Certificate]:

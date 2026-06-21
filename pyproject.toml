@@ -1,5 +1,5 @@
 [project]
-name = "iotls-mole"
+name = "trustfall"
 version = "0.1.0"
 description = "Transparent IoT TLS certificate validation test harness"
 requires-python = ">=3.11"
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-iotls-mole = "iotls_mole.cli:main"
+trustfall = "trustfall.cli:main"
 
 [build-system]
 requires = ["hatchling"]
