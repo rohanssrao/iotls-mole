@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -24,6 +26,11 @@ from .scan import scan as scan_secrets
 CONNTRACK = "/proc/net/nf_conntrack"
 BUF = 65535
 HANDSHAKE_TIMEOUT = 8.0
+
+
+def conntrack_available() -> bool:
+    """DTLS needs to recover original destinations; that requires conntrack visibility."""
+    return os.path.exists(CONNTRACK) or shutil.which("conntrack") is not None
 
 
 def _conntrack_lines() -> list[str]:

@@ -47,6 +47,14 @@ def require_root():
         raise SystemExit("trustfall must run as root for ARP spoofing / packet redirection")
 
 
+def require_tools():
+    """Fail fast with a clear message if a core binary is missing (vs a traceback)."""
+    needed = ["route", "ifconfig"] if IS_MACOS else ["ip"]
+    missing = [t for t in needed if not shutil.which(t)]
+    if missing:
+        raise SystemExit(f"missing required tool(s): {', '.join(missing)} \u2014 install iproute2 / base networking utils")
+
+
 # --- default route / interface discovery -------------------------------------
 
 def default_route() -> tuple[str, str]:

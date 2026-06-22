@@ -80,14 +80,15 @@ def main(argv=None):
 
     from .certs import CertificateFactory
     from .dns import DNSResponder
-    from .dtls import DtlsProxy, HAVE_PYOPENSSL
+    from .dtls import DtlsProxy, HAVE_PYOPENSSL, conntrack_available
     from .proxy import ProxyServer, State
     from .netos import IS_MACOS, detect_firewall
-    from .system import ArpSpoofer, IPv6Suppressor, Netfilter, NfTables, discover, require_root, start_dns_sniffer
+    from .system import ArpSpoofer, IPv6Suppressor, Netfilter, NfTables, discover, require_root, require_tools, start_dns_sniffer
 
     args = parse_args(argv)
     print(BANNER, file=sys.stderr)
     require_root()
+    require_tools()
 
     backend = detect_firewall(args.firewall)
     Redirector = {"nft": NfTables, "iptables": Netfilter}.get(backend, Netfilter)
@@ -140,7 +141,8 @@ def main(argv=None):
     state = State(strategies, stop_on_success=not args.continue_after_success)
     funnel = args.funnel and args.mode == "active" and not args.no_netfilter
     dns_port = args.dns_listen_port if funnel else 0
-    dtls_active = args.dtls and args.mode == "active" and not args.no_netfilter and not IS_MACOS and HAVE_PYOPENSSL
+    dtls_requested = args.dtls and args.mode == "active" and not args.no_netfilter and not IS_MACOS
+    dtls_active = dtls_requested and HAVE_PYOPENSSL and conntrack_available()
     dtls_port = args.dtls_listen_port if dtls_active else 0
     keylog_path = str(session_dir / "sslkeys.log") if args.pcap else None
     proxy = ProxyServer(
@@ -236,8 +238,11 @@ def main(argv=None):
                                bind_host="0.0.0.0", no_payloads=args.no_payloads)
         threading.Thread(target=dtls_proxy.serve, daemon=True).start()
         log.emit("INFO", msg="dtls interception active (CoAP/DTLS :5684)")
-    elif args.dtls and args.mode == "active" and not args.no_netfilter and not IS_MACOS and not HAVE_PYOPENSSL:
+    elif dtls_requested and not HAVE_PYOPENSSL:
         log.emit("WARN", msg="DTLS interception requested but pyOpenSSL not installed; CoAP/DTLS detected only")
+    elif dtls_requested and not conntrack_available():
+        log.emit("WARN", msg="DTLS interception needs conntrack visibility (install conntrack-tools or enable "
+                              "/proc/net/nf_conntrack); leaving CoAP/DTLS untouched, detected only")
 
     if not args.no_arp:
         spoofer = ArpSpoofer(env, log)

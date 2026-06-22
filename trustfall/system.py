@@ -13,7 +13,7 @@ from scapy.all import (  # type: ignore
 )
 
 from .coap import parse_coap
-from .netos import DOH_IPS, default_route, iface_ip, read_forwarding, require_root, run
+from .netos import DOH_IPS, default_route, iface_ip, read_forwarding, require_root, require_tools, run
 from .tlshello import dtls_version, looks_dtls_client_hello, looks_tls, parse_client_hello
 from . import APP
 

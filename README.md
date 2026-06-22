@@ -1,4 +1,4 @@
-# Trustfall
+# trustfall
 
 A transparent MitM harness for sniffing and breaking TLS over a network. It ARP-spoofs the target, redirects its TCP flows through a local proxy, and tries several strategies to crack its TLS traffic. Outputs plaintext, findings by category, and a .pcap for analysis. Designed to be as easy as possible to use -- no configuration or preparation necessary.
 
